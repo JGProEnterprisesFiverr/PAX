@@ -1,0 +1,247 @@
+pragma solidity ^0.4.25;
+
+import "./SafeMath.sol";
+import "./Owned.sol";
+import "./IERC20.sol";
+import "https://raw.githubusercontent.com/oraclize/ethereum-api/master/oraclizeAPI_0.4.25.sol";
+
+contract PAXTokenContract is IERC20, Owned, usingOraclize {
+    using SafeMath for uint256;
+    
+    // Constructor - Sets the token Owner
+    constructor() public {
+        owner = 0x7645Ad8D4a2cD5b07D8Bc4ea1690d5c1F765aabC;
+        treasury = 0x7645Ad8D4a2cD5b07D8Bc4ea1690d5c1F765aabC;
+        _balances[owner] = 6000*76*10000000000000000;
+        emit Transfer(contractAddress, owner, 6000*76*10000000000000000);
+        contractAddress = this;
+    }
+    
+    // Events
+    event Error(string err);
+    event Mint(uint mintAmount, uint newSupply, uint block);
+    event PriceUpdate(uint price, uint block);
+    event Burn(address from, uint amount);
+    
+    // Token Setup
+    string public constant name = "PAX";
+    string public constant symbol = "PXC";
+    uint256 public constant decimals = 8;
+    uint256 public price = 0;
+    uint256 public supply = 6000*76*10000000000000000;
+    
+    uint256 public priceUpdateFrequency = 1440; // 1440 is average amount of blocks in 6 hours.
+    uint256 public mintFrequency = 40320; // 40320 is average amount of blocks per weeek
+    uint256 public demurrageFrequency = 2102400; // 2102400 is average amount of blocks per year
+    uint256 public demurrageAmount = 2; // In percent
+    uint256 public treasuryRatio = 25; // Amount of new minted tokens to be sent to treasury address in percent
+
+    uint256 public lastMint;
+    uint256 public lastPriceUpdate;
+    address public contractAddress;
+    address public treasury;
+    
+    string public oraclePriceURL = "json(https://spreadsheets.google.com/feeds/list/1pL8-QrNJrN1OFUmFNqt0IMDc6uepEuYLLAS-d8LxprI/od6/public/values?alt=json).feed.entry[1].['gsx$_ciyn3'].['$t']";
+    string public oracleWorldPopulationURL = "json(http://api.population.io/1.0/population/World/today-and-tomorrow/?format=json).total_population[0].population";
+    
+    string public constant LegalAcknowledgement = "https://ipfs.io/ipfs/QmYv5yLgs77bcbPSXYvUFbB9WivxPX2ehPTemM8tycDQG2";
+    
+    // Fallback function
+    function () public payable {}
+    
+    // Balances for each account
+    mapping(address => uint256) _balances;
+    
+    // Block of last transaction, used for demurrage
+    mapping(address => uint256) public lastTX;
+    
+    // Mapping to check oraclize query function
+    mapping(bytes32 => bool) public queryType;
+ 
+    // Owner of account approves the transfer of an amount to another account
+    mapping(address => mapping (address => uint256)) _allowed;
+ 
+    // Get the total supply of tokens
+    function totalSupply() public constant returns (uint) {
+        return supply;
+    }
+ 
+    // Get the token balance for account `tokenOwner`
+    function balanceOf(address tokenOwner) public constant returns (uint balance) {
+        return _balances[tokenOwner];
+    }
+ 
+    // Get the allowance of funds beteen a token holder and a spender
+    function allowance(address tokenOwner, address spender) public constant returns (uint remaining) {
+        return _allowed[tokenOwner][spender];
+    }
+ 
+    // Transfer the balance from owner's account to another account
+    function transfer(address to, uint value) public returns (bool success) {
+        demurrageBalance(msg.sender);
+        _balances[msg.sender] = _balances[msg.sender].sub(value);
+        _balances[to] = _balances[to].add(value);
+        emit Transfer(msg.sender, to, value);
+        pushUpdate();
+        return true;
+    }
+    
+    // Sets how much a sender is allowed to use of an owners funds
+    function approve(address spender, uint value) public returns (bool success) {
+        _allowed[msg.sender][spender] = value;
+        emit Approval(msg.sender, spender, value);
+        return true;
+    }
+    
+    // Transfer from function, pulls from allowance
+    function transferFrom(address from, address to, uint value) public returns (bool success) {
+        demurrageBalance(from);
+        require(value <= balanceOf(from));
+        require(value <= allowance(from, to));
+        _balances[from] = _balances[from].sub(value);
+        _balances[to] = _balances[to].add(value);
+        _allowed[from][to] = _allowed[from][to].sub(value);
+        emit Transfer(from, to, value);
+        return true;
+    }
+    
+    // Burn tokens
+    function burn(uint256 _amount, address _from) onlyOwner public returns (bool success) {
+        require(_balances[_from] >= _amount);
+        _balances[_from] -= _amount;
+        supply -= _amount;
+        emit Transfer(_from, address(0), _amount);
+        emit Burn(_from, _amount);
+        return true;
+    }
+    
+    // Sets a new Price Update Frequency
+    function setPriceUpdateFrequency(uint256 _new) onlyOwner public returns (bool success) {
+        priceUpdateFrequency = _new;
+        return true;
+    }
+    
+    // Sets a new Mint Frequency
+    function setMintFrequency(uint256 _new) onlyOwner public returns (bool success) {
+        mintFrequency = _new;
+        return true;
+    }
+    
+    // Sets a new demurrage Frequency
+    function setDemurrageFrequency(uint256 _new) onlyOwner public returns (bool success) {
+        demurrageFrequency = _new;
+        return true;
+    }
+    
+    // Sets a new demurrage amount
+    function setDemurrageAmount(uint256 _new) public onlyOwner returns (bool success) {
+        demurrageAmount = _new;
+        return true;
+    }
+    
+    // Sets a new treasury ratio
+    function setTreasuryRatio(uint256 _new) public onlyOwner returns (bool success) {
+        treasuryRatio = _new;
+        return true;
+    }
+    
+    // Sets a new treasury address
+    function setTreasuryRatio(address _new) public onlyOwner returns (bool success) {
+        treasury = _new;
+        return true;
+    }
+    
+    // Sets a new URL for getting price via Oraclize
+    function setOraclePriceURL(string _new) public onlyOwner returns (bool success) {
+        oraclePriceURL = _new;
+        return true;
+    }
+    // Sets a new URL for getting world population via Oraclize
+    function setOracleWorldPopulationURL(string _new) public onlyOwner returns (bool success) {
+        oracleWorldPopulationURL = _new;
+        return true;
+    }
+    
+    // Check Demurrage
+    function demurrageBalance(address _address) public {
+        require(lastTX[_address] <= block.number + demurrageFrequency);
+        uint256 _times = (block.number - lastTX[_address]) / demurrageFrequency;
+        uint256 _amount = _balances[_address] / 100 * demurrageAmount;
+        uint256 _demurrage = _times * _amount;
+        emit Transfer(_address, owner, _demurrage);
+        _balances[_address] -= _demurrage;
+        _balances[owner] += _demurrage;
+        lastTX[_address] = block.number;
+    }
+    
+    // String to Interger paserser for oracle
+    function parseInt(string _a, uint _b) internal pure returns (uint) {
+        bytes memory bresult = bytes(_a);
+        uint mint = 0;
+        bool _decimals = false;
+        for (uint i = 0; i < bresult.length; i++) {
+            if ((bresult[i] >= 48) && (bresult[i] <= 57)) {
+                if (_decimals) {
+                    if (_b == 0) break;
+                    else _b--;
+                }
+                mint *= 10;
+                mint += uint(bresult[i]) - 48;
+            } else if (bresult[i] == 46) _decimals = true;
+        }
+        return mint;
+    }
+    
+    /* ~~~ Get oracle information ~~~ */
+    
+    // Push update checks if there needs to be an update call
+    function pushUpdate() public {
+        // Mint tokens by calling oracle
+        if (block.number >= (lastMint + mintFrequency)) {
+            if (oraclize_getPrice("URL") > contractAddress.balance) {
+                emit Error("Not enought ETH to call Oraclize!");
+            } else {
+                bytes32 queryId = oraclize_query("URL", oracleWorldPopulationURL);
+                queryType[queryId] = true;
+            }
+        }
+        // Updates the price using oracle
+        if (block.number >= (lastPriceUpdate + priceUpdateFrequency)) {
+            if (oraclize_getPrice("URL") > contractAddress.balance) {
+                emit Error("Not enought ETH to call Oraclize!");
+            } else {
+                oraclize_query("URL", oraclePriceURL);
+            }
+        }
+    }
+    
+    // Oraclize Callback function
+    function __callback(bytes32 queryID, string result) public {
+        if (msg.sender != oraclize_cbAddress()) revert();
+        
+        if (queryType[queryID] == true) {
+            uint _newTotal = parseInt(result);
+            uint256 newTotal = uint256(_newTotal) * 6000 * 10 ** decimals;
+            uint256 mintAmount = newTotal - supply;
+            uint256 treasuryDistribution = mintAmount * treasuryRatio / 100;
+            _balances[owner] = _balances[owner] + mintAmount - treasuryDistribution;
+            _balances[treasury] = _balances[treasury] + treasuryDistribution;
+            supply = newTotal;
+            lastMint = block.number;
+            emit Mint(mintAmount, newTotal, lastMint);
+            emit Transfer(contractAddress, owner, mintAmount - treasuryDistribution);
+            emit Transfer(contractAddress, treasury, treasuryDistribution);
+        } else {
+            uint _newPrice = parseInt(result);
+            price = _newPrice;
+            lastPriceUpdate = block.number;
+            emit PriceUpdate(price, lastPriceUpdate);
+        }
+    }
+    
+    // Will send all ETH in contract to the owner
+    function withdrawETH() onlyOwner public returns (bool success) {
+        owner.transfer(contractAddress.balance);
+        return true;
+    }
+}
